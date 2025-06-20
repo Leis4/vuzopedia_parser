@@ -7,77 +7,198 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException, ElementClickInterceptedException
 from vuzopedia_parser.pages.main_page import MainPage
 
+
 def click_show_specialties(driver, logger, timeout=10):
     """
-    Кликает на кнопку "Показать специальности" или "Посмотреть все комбинаций".
-    Скрывает/скроллит, если надо.
+    Кликает на кнопку "Показать специальности" или аналогичные элементы, раскрывает блок с комбинациями.
     """
+    selectors = [
+        "a.openSideCont", "div.buttonNewComb", "div.buttonNewCombActive",
+        "button.show-combinations", ".show-all-combinations",
+    ]
+    xpath_texts = ["contains(text(), 'Все комбинации')", "contains(text(), 'Показать специальности')", "contains(text(), 'Посмотреть все')"]
+    # Скрыть возможные мешающие баннеры
     try:
-        btn = WebDriverWait(driver, timeout).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR,
-                "a.openSideCont, div.buttonNewComb, div.buttonNewCombActive"))
-        )
-        # Скрыть возможные баннеры мешающие
-        try:
-            banner = driver.find_element(By.CSS_SELECTOR, "#fab")
+        banners = driver.find_elements(By.CSS_SELECTOR, "#fab, .overlay-banner, .fixed-banner")
+        for banner in banners:
             driver.execute_script("arguments[0].style.display='none'", banner)
-        except:
-            pass
-        driver.execute_script("arguments[0].scrollIntoView(true);", btn)
-        time.sleep(0.3)
+    except Exception:
+        pass
+    # Попробовать несколько попыток кликнуть
+    for attempt in range(3):
+        # Попробовать CSS селекторы
+        for sel in selectors:
+            try:
+                btn = WebDriverWait(driver, timeout).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
+                )
+                driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+                time.sleep(0.3)
+                try:
+                    btn.click()
+                except ElementClickInterceptedException:
+                    logger.info("Click intercepted, пытаемся через JS на селектор %s", sel)
+                    driver.execute_script("arguments[0].click();", btn)
+                time.sleep(0.5)
+                return True
+            except Exception:
+                continue
+        # Попробовать XPath по тексту
+        for txt in xpath_texts:
+            try:
+                btn = WebDriverWait(driver, timeout).until(
+                    EC.element_to_be_clickable((By.XPATH, f"//*[ {txt} ]"))
+                )
+                driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+                time.sleep(0.3)
+                try:
+                    btn.click()
+                except ElementClickInterceptedException:
+                    logger.info("Click intercepted via JS для текста %s", txt)
+                    driver.execute_script("arguments[0].click();", btn)
+                time.sleep(0.5)
+                return True
+            except Exception:
+                continue
+        # Если не нашли, прокрутить
         try:
-            btn.click()
-        except ElementClickInterceptedException:
-            logger.info("Click intercepted, пытаемся через JS")
-            driver.execute_script("arguments[0].click();", btn)
-        time.sleep(0.5)
-    except TimeoutException:
-        logger.info("Кнопка 'Показать специальности' не найдена или не успела загрузиться")
-    except Exception as e:
-        logger.exception(f"Ошибка при клике 'Показать специальности': {e}")
+            driver.execute_script("window.scrollBy(0, window.innerHeight);")
+        except Exception:
+            pass
+        time.sleep(1)
+    logger.debug("Кнопка показа комбинаций не найдена после попыток")
+    return False
+
+
+def normalize_subject(subject):
+    s = subject.strip().lower()
+    # Упрощение названий
+    s = s.replace("русский язык", "русский")
+    s = s.replace("математика (профильная)", "математика")
+    s = s.replace("математика профильная", "математика")
+    s = s.replace("информатика и икт", "информатика")
+    # Убрать скобки и лишние описания
+    if '(' in s:
+        s = s.split('(')[0].strip()
+    return s
+
+
+def find_ege_combination(driver, logger, timeout=10, target_subjects=None):
+    """Пытается найти нужную комбинацию ЕГЭ на странице университета"""
+    if target_subjects is None:
+        target_subjects = {"русский", "математика", "информатика"}
+    # Попытаться кликнуть показать все комбинации
+    click_show_specialties(driver, logger, timeout)
+    # Дать время на загрузку
+    time.sleep(1.5)
+    selectors = [
+        "div.blockItemComb",
+        "div.contCombsBlock",
+        ".combination-selector",
+        ".ege-combination",
+        ".comb-list",
+    ]
+    elems = []
+    for attempt in range(4):
+        try:
+            WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, ",".join(selectors)))
+            )
+        except TimeoutException:
+            logger.debug(f"Попытка {attempt+1}: блоки комбинаций не появились за время ожидания")
+        # Собираем элементы
+        elems = []
+        for sel in selectors:
+            try:
+                found = driver.find_elements(By.CSS_SELECTOR, sel)
+                if found:
+                    elems.extend(found)
+            except Exception:
+                continue
+        if elems:
+            break
+        # Если не нашли, прокрутить вниз и попробовать снова
+        try:
+            driver.execute_script("window.scrollBy(0, window.innerHeight);")
+        except Exception:
+            pass
+        # Повторно попытаться раскрыть комбинации
+        click_show_specialties(driver, logger, timeout)
+        time.sleep(1)
+    if not elems:
+        logger.debug("После нескольких попыток блоки комбинаций не найдены")
+    # Проанализировать найденные блоки
+    for el in elems:
+        parts = []
+        try:
+            items = el.find_elements(By.CSS_SELECTOR, "div.itemNewBlockComb, .item-comb-element")
+            if items:
+                for item in items:
+                    text = item.text.strip()
+                    if text:
+                        parts.append(text)
+            else:
+                text = el.text.strip()
+                if not text:
+                    continue
+                if ',' in text:
+                    parts = [t.strip() for t in text.split(',') if t.strip()]
+                elif '\n' in text:
+                    parts = [t.strip() for t in text.split('\n') if t.strip()]
+                elif ';' in text:
+                    parts = [t.strip() for t in text.split(';') if t.strip()]
+                else:
+                    child_texts = []
+                    for child in el.find_elements(By.XPATH, ".//*"):
+                        ct = child.text.strip()
+                        if ct:
+                            child_texts.append(ct)
+                    parts = child_texts or [text]
+        except Exception as inner_e:
+            logger.debug(f"Ошибка получения частей комбинации: {inner_e}")
+            continue
+        normalized = {normalize_subject(p) for p in parts if p.strip()}
+        logger.debug(f"Комбинация из элемента: {normalized}")
+        if normalized == target_subjects:
+            logger.info(f"Найдена подходящая комбинация: {normalized}")
+            return True
+    # Дополнительно попытаться через XPath
+    try:
+        xpath_expr = "//div[contains(@class,'blockItemComb')]//div[contains(@class,'itemNewBlockComb')]"
+        elems_xpath = driver.find_elements(By.XPATH, xpath_expr)
+        parts = [el.text.strip() for el in elems_xpath if el.text.strip()]
+        normalized = {normalize_subject(p) for p in parts}
+        logger.debug(f"Комбинация из XPath: {normalized}")
+        if normalized == target_subjects:
+            logger.info(f"Найдена подходящая комбинация через XPath: {normalized}")
+            return True
+    except Exception:
+        pass
+    logger.debug("Подходящая комбинация не найдена")
+    # Для отладки можно раскомментировать:
+    # logger.debug(driver.page_source)
+    return False
+
 
 def process_university(arg):
-    """
-    arg: (uni_url, cfg), cfg содержит driver, logger, valid_codes и т.п.
-    Возвращает список: [(prog_url, data_dict), ...] или [].
-    """
     uni_url, cfg = arg
     driver = cfg.get("driver")
     logger = cfg.get("logger")
     timeout = cfg.get("timeout", 10)
-    valid_codes = cfg.get("valid_codes", [])  # список допустимых кодов программ, при необходимости
+    valid_codes = cfg.get("valid_codes", [])
     results = []
     try:
         driver.get(uni_url)
         WebDriverWait(driver, timeout).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
         )
-        click_show_specialties(driver, logger, timeout)
-
-        # Пример поиска комбинаций ЕГЭ на странице университета
-        comb = None
-        try:
-            # скорректируйте селектор под реальный сайт
-            comb_elements = driver.find_elements(By.CSS_SELECTOR, ".combination-selector")
-            for el in comb_elements:
-                texts = [t.strip() for t in el.text.split(',')]
-                # проверить, подходит ли комбинация:
-                # пример: если хотите именно конкретный набор, напишите условие:
-                # if set(texts) == set(["Русский язык", "Математика", "Информатика"]):
-                #     comb = texts
-                #     break
-                # Пока оставляем как заглушку:
-                # если нашли нужную комбинацию, установите comb = texts и break
-                pass
-        except Exception:
-            pass
-        if comb is None:
+        # Проверка комбинации ЕГЭ
+        if not find_ege_combination(driver, logger, timeout):
             logger.info(f"Комбинация ЕГЭ не подходит: {uni_url}")
             return []
-
-        # Найти направления (скорректировать селектор)
+        # Перейти по направлениям
         try:
-            directions = driver.find_elements(By.CSS_SELECTOR, "a.napravlenie-link")
+            directions = driver.find_elements(By.CSS_SELECTOR, "a.napravlenie-link, .direction-link")
         except Exception:
             directions = []
         for d in directions:
@@ -87,21 +208,19 @@ def process_university(arg):
             driver.get(dir_link)
             try:
                 WebDriverWait(driver, timeout).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "div.program-item"))
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "div.program-item, .program-list"))
                 )
             except TimeoutException:
                 logger.warning(f"Не дождались списка программ на направлении: {dir_link}")
                 continue
-            # Собираем ссылки программ (скорректировать селектор)
             try:
-                program_links = driver.find_elements(By.CSS_SELECTOR, "a.program-item-link")
+                program_links = driver.find_elements(By.CSS_SELECTOR, "a.program-item-link, .program-link")
             except Exception:
                 program_links = []
             for p in program_links:
                 prog_url = p.get_attribute("href")
                 if not prog_url:
                     continue
-                # Открываем страницу программы
                 driver.get(prog_url)
                 try:
                     WebDriverWait(driver, timeout).until(
@@ -110,35 +229,26 @@ def process_university(arg):
                 except TimeoutException:
                     logger.warning(f"Не дождались загрузки страницы программы: {prog_url}")
                     continue
-                # Пример сбора данных из страницы программы. Скорректируйте под нужные поля:
                 data = {"url": prog_url}
-                # Например:
                 try:
-                    title_el = driver.find_element(By.CSS_SELECTOR, "h1")
+                    title_el = driver.find_element(By.CSS_SELECTOR, "h1, .program-title")
                     data["title"] = title_el.text.strip()
-                except:
+                except Exception:
                     pass
-                # Соберите другие поля...
-                # Можно проверять код программы и фильтровать по valid_codes:
-                # code = data.get("code")
-                # if valid_codes and code not in valid_codes:
-                #     logger.info(f"Код {code} не в списке valid_codes, пропускаем: {prog_url}")
-                #     continue
                 results.append((prog_url, data))
         return results
-
     except Exception as e:
         logger.exception(f"Ошибка в process_university для {uni_url}: {e}")
         return []
 
+
 def main():
     logger = logging.getLogger("main")
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     ch = logging.StreamHandler()
     ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(ch)
 
-    # Инициализация WebDriver
     driver = webdriver.Chrome()
     base_url = "https://vuzopedia.ru"
     city_id = 59
@@ -159,7 +269,7 @@ def main():
                 "driver": driver,
                 "logger": logger,
                 "timeout": 10,
-                "valid_codes": [],  # при необходимости укажите список допустимых кодов
+                "valid_codes": [],
             }
             uni_results = process_university((uni_url, cfg))
             if not isinstance(uni_results, (list, tuple)):
@@ -182,16 +292,12 @@ def main():
         except Exception as e:
             logger.exception(f"Ошибка при обработке университета {uni_url}: {e}")
             skipped_unis.append(uni_url)
-        # небольшая пауза между университетами, если нужно
-        # time.sleep(1)
 
     logger.info(f"Всего программ собрано: {len(all_results)}; пропущено вузов: {len(skipped_unis)}")
     if skipped_unis:
         logger.info("Список пропущенных вузов:")
         for u in skipped_unis:
             logger.info(f"  {u}")
-
-    # TODO: Дальнейшая обработка all_results
 
     driver.quit()
 
