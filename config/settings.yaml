@@ -1,0 +1,30 @@
+base_url: "https://vuzopedia.ru"
+cookies_path: "cookies.pkl"
+headless: false
+timeout: 10
+valid_codes:
+  - "01.03.01"
+  - "01.03.02"
+  - "01.03.04"
+  - "01.03.05"
+  - "02.03.01"
+  - "02.03.02"
+  - "03.03.01"
+  - "09.03.01"
+  - "09.03.02"
+  - "09.03.03"
+  - "09.03.04"
+  - "38.03.05"
+city_id: 59
+ege_subjects:
+  - name: "rus"
+    score: 72
+  - name: "mat"
+    score: 76
+  - name: "inform"
+    score: 82
+direction_id: 5
+state_file: "state.json"
+max_retries: 3
+retry_delay: 2
+workers: 1
